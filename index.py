@@ -1,11 +1,12 @@
 import os
 import json
-import random
-import hashlib
 import logging
 import mysql.connector
 import base64
 import shutil
+import secrets
+from argon2  import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, InvalidHashError
 from datetime import datetime
 from pathlib import Path
 from bottle import route, run, template, post, request, response, static_file, error, hook
@@ -13,6 +14,8 @@ from dotenv import load_dotenv
 
 # Cargar las varaibles de entorno
 load_dotenv(Path(__file__).resolve().parent / ".env")
+# Instancia de  la clase PasswordHasher
+ph = PasswordHasher() 
 
 
 logging.basicConfig(
@@ -61,18 +64,8 @@ def error500(e):
 
 
 def getToken():
-	tiempo = datetime.now().timestamp()
-	numero = random.random()
-	cadena = str(tiempo) + str(numero)
-	numero2 = random.random()
-	cadena2 = str(numero)+str(tiempo)+str(numero2)
-	m = hashlib.sha1()
-	m.update(cadena.encode())
-	P = m.hexdigest()
-	m = hashlib.md5()
-	m.update(cadena.encode())
-	Q = m.hexdigest()
-	return f"{P[:20]}{Q[20:]}"
+	return secrets.token_hex(20)
+
 
 """
 */ 
@@ -108,10 +101,10 @@ def Registro():
 
 	try:
 		with db.cursor() as cursor:
-			sql = f'insert into Usuario values (Null, %s, %s, MD5(%s))'
-			values = (request.json["uname"], request.json["email"], request.json["password"]);
-			cursor.execute(sql, values)
-			
+
+			# Hash con Argon y Salt
+			hash_pw = ph.hash(request.json["password"])
+			cursor.execute('insert into Usuario values (Null, %s, %s, %s)',(request.json["uname"], request.json["email"], hash_pw))
 			R = cursor.lastrowid
 			db.commit()
 		db.close()
@@ -146,25 +139,36 @@ def Login():
 	R = False
 
 	try:
+
 		with db.cursor() as cursor:
-			sql = f'Select id from  Usuario where uname = %s and password = md5(%s)'
-			values = (request.json["uname"], request.json["password"])
-			cursor.execute(sql, values)
+			cursor.execute('Select id, password from Usuario where uname = %s',(request.json["uname"],))
 			R = cursor.fetchall()
+
 	except Exception:
 		log.exception("Error en Login")
 		db.close()
 		return {"R":-2}
-	
-	if not R:
+
+	usuario_verificado = False
+
+	if R: 
+		try:
+			usuario_verificado = ph.verify(R[0][1],request.json["password"])
+		except (VerifyMismatchError,InvalidHashError):
+			usuario_verificado = False
+
+
+	if not usuario_verificado:
 		db.close()
 		return {"R":-3}
+
+	id_usuario = R[0][0]
 	
 	T = getToken();
 	try:
 		with db.cursor() as cursor:
-			cursor.execute('Delete from AccesoToken where id_Usuario = %s', (R[0][0],))
-			cursor.execute('insert into AccesoToken values(%s, %s, now())', (R[0][0], T))
+			cursor.execute('Delete from AccesoToken where id_Usuario = %s', (id_usuario,))
+			cursor.execute('insert into AccesoToken values(%s, %s, now())', (id_usuario, T))
 			db.commit()
 			db.close()
 			return {"R":0,"D":T}
