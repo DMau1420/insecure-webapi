@@ -1,30 +1,65 @@
+import os
 import json
 import random
 import hashlib
+import logging
 import mysql.connector
 import base64
 import shutil
 from datetime import datetime
 from pathlib import Path
-from bottle import route, run, template, post, request, static_file
+from bottle import route, run, template, post, request, response, static_file, error, hook
+from dotenv import load_dotenv
+
+# Cargar las varaibles de entorno
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
+logging.basicConfig(
+	filename=os.environ.get("LOG_FILE", "app.log"),
+	level=logging.INFO,
+	format="%(asctime)s %(levelname)s %(message)s"
+)
+log = logging.getLogger("api")
 
-def loadDatabaseSettings(pathjs):
-	pathjs = Path(pathjs)
-	sjson = False
-	if pathjs.exists():
-		with pathjs.open() as data:
-			sjson = json.load(data)
-	return sjson
-	
-"""
-function loadDatabaseSettings(pathjs):
-	string = file_get_contents(pathjs);
-	json_a = json_decode(string, true);
-	return json_a;
 
-"""
+def getDatabase():
+	"""Conexion con credenciales tomadas del entorno (.env), no del repositorio."""
+	return mysql.connector.connect(
+		host=os.environ.get("DB_HOST", "localhost"),
+		port=int(os.environ.get("DB_PORT", "3306")),
+		database=os.environ["DB_NAME"],
+		user=os.environ["DB_USER"],
+		password=os.environ["DB_PASSWORD"]
+	)
+
+@hook('after_request')
+def security_headers():
+	response.set_header('X-Content-Type-Options', 'nosniff')
+	response.set_header('X-Frame-Options', 'DENY')
+	response.set_header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'")
+	response.set_header('Referrer-Policy', 'no-referrer')
+	response.set_header('Cache-Control', 'no-store')
+	response.set_header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+
+# Errores genericos
+@error(404)
+def error404(e):
+	response.content_type = 'application/json'
+	return json.dumps({"R": -404})
+
+@error(405)
+def error405(e):
+	response.content_type = 'application/json'
+	return json.dumps({"R": -405})
+
+@error(500)
+def error500(e):
+	log.error("Error 500: %s", e.exception, exc_info=True)
+	response.content_type = 'application/json'
+	return json.dumps({"R": -500})
+
+
 def getToken():
 	tiempo = datetime.now().timestamp()
 	numero = random.random()
@@ -54,23 +89,17 @@ def getToken():
 """
 @post('/Registro')
 def Registro():
-	dbcnf = loadDatabaseSettings('db.json');
-	db = mysql.connector.connect(
-		host='localhost', port = dbcnf['port'],
-		database = dbcnf['dbname'],
-		user = dbcnf['user'],
-		password = dbcnf['password']
-	)
-	####/ obtener el cuerpo de la peticion
+
+	db = getDatabase()
+
 	if not request.json:
 		return {"R":-1}
 	R = 'uname' in request.json and 'email' in request.json and 'password' in request.json
-	# TODO checar si estan vacio los elementos del json
+	
 	if not R:
 		return {"R":-1}
-	# TODO validar correo en json
-	# TODO Control de error de la DB
 	R = False
+
 	try:
 		with db.cursor() as cursor:
 			sql = f'insert into Usuario values (Null, %s, %s, MD5(%s))'
@@ -80,13 +109,10 @@ def Registro():
 			R = cursor.lastrowid
 			db.commit()
 		db.close()
-	except Exception as e:
-		print(e) 
+	except Exception:
+		log.exception("Error en Registro")
 		return {"R":-2}
 	return {"R":0,"D":R}
-
-
-
 
 """
 /*
@@ -103,43 +129,32 @@ def Registro():
 
 @post('/Login')
 def Login():
-	dbcnf = loadDatabaseSettings('db.json');
-	db = mysql.connector.connect(
-		host='localhost', port = dbcnf['port'],
-		database = dbcnf['dbname'],
-		user = dbcnf['user'],
-		password = dbcnf['password']
-	)
-	###/ obtener el cuerpo de la peticion
+	db = getDatabase()
+
 	if not request.json:
 		return {"R":-1}
-	######/
 	R = 'uname' in request.json  and 'password' in request.json
-	# TODO checar si estan vacio los elementos del json
+
 	if not R:
 		return {"R":-1}
-	
-	# TODO validar correo en json
-	# TODO Control de error de la DB
 	R = False
+
 	try:
 		with db.cursor() as cursor:
 			sql = f'Select id from  Usuario where uname = %s and password = md5(%s)'
 			values = (request.json["uname"], request.json["password"])
 			cursor.execute(sql, values)
 			R = cursor.fetchall()
-	except Exception as e: 
-		print(e)
+	except Exception:
+		log.exception("Error en Login")
 		db.close()
 		return {"R":-2}
-	
 	
 	if not R:
 		db.close()
 		return {"R":-3}
 	
 	T = getToken();
-	#file_put_contents('/tmp/log','insert into AccesoToken values('.R[0].',"'.T.'",now())');
 	try:
 		with db.cursor() as cursor:
 			cursor.execute('Delete from AccesoToken where id_Usuario = %s', (R[0][0],))
@@ -147,8 +162,8 @@ def Login():
 			db.commit()
 			db.close()
 			return {"R":0,"D":T}
-	except Exception as e:
-		print(e)
+	except Exception:
+		log.exception("Error guardando token")
 		db.close()
 		return {"R":-4}
 
@@ -175,25 +190,17 @@ def Imagen():
 	img = Path('img')
 	if not img.exists():
 		img.mkdir()
-	
-	###/ obtener el cuerpo de la peticion
+
 	if not request.json:
 		return {"R":-1}
-	######/
 	R = 'name' in request.json  and 'data' in request.json and 'ext' in request.json  and 'token' in request.json
-	# TODO checar si estan vacio los elementos del json
+
 	if not R:
 		return {"R":-1}
 	
-	dbcnf = loadDatabaseSettings('db.json');
-	db = mysql.connector.connect(
-		host='localhost', port = dbcnf['port'],
-		database = dbcnf['dbname'],
-		user = dbcnf['user'],
-		password = dbcnf['password']
-	)
+	ext = str(request.json['ext'])
+	db = getDatabase()
 
-	# Validar si el usuario esta en la base de datos
 	TKN = request.json['token'];
 	
 	R = False
@@ -201,8 +208,8 @@ def Imagen():
 		with db.cursor() as cursor:
 			cursor.execute('select id_Usuario from AccesoToken where token = %s', (str(TKN),))
 			R = cursor.fetchall()
-	except Exception as e: 
-		print(e)
+	except Exception:
+		log.exception("Error validando token en Imagen")
 		db.close()
 		return {"R":-2}
 	
@@ -211,8 +218,6 @@ def Imagen():
 	with open(f'tmp/{id_Usuario}',"wb") as imagen:
 		imagen.write(base64.b64decode(request.json['data'].encode()))
 	
-	############################
-	############################
 	# Guardar info del archivo en la base de datos
 	try:
 		with db.cursor() as cursor:
@@ -225,8 +230,8 @@ def Imagen():
 			# Mover archivo a su nueva locacion
 			shutil.move('tmp/'+str(id_Usuario),f'img/{idImagen}.{ext}')
 			return {"R":0,"D":idImagen}
-	except Exception as e: 
-		print(e)
+	except Exception:
+		log.exception("Error guardando imagen")
 		db.close()
 		return {"R":-3}
 	
@@ -245,26 +250,16 @@ def Imagen():
 
 @post('/Descargar')
 def Descargar():
-	dbcnf = loadDatabaseSettings('db.json');
-	db = mysql.connector.connect(
-		host='localhost', port = dbcnf['port'],
-		database = dbcnf['dbname'],
-		user = dbcnf['user'],
-		password = dbcnf['password']
-	)
+
+	db = getDatabase()
 	
-	
-	###/ obtener el cuerpo de la peticion
 	if not request.json:
 		return {"R":-1}
-	######/
 	R = 'token' in request.json and 'id' in request.json  
-	# TODO checar si estan vacio los elementos del json
+
 	if not R:
 		return {"R":-1}
 	
-	# TODO validar correo en json
-	# Comprobar que el usuario sea valido
 	TKN = request.json['token'];
 	idImagen = request.json['id'];
 	
@@ -273,25 +268,23 @@ def Descargar():
 		with db.cursor() as cursor:
 			cursor.execute('select id_Usuario from AccesoToken where token = %s', (str(TKN),))
 			R = cursor.fetchall()
-	except Exception as e: 
-		print(e)
+	except Exception:
+		log.exception("Error validando token en Descargar")
 		db.close()
 		return {"R":-2}
 		
-	
-	
 	# Buscar imagen y enviarla
-	
 	try:
 		with db.cursor() as cursor:
 			cursor.execute('Select name,ruta from  Imagen where id = %s', (idImagen,))
 			R = cursor.fetchall()
-	except Exception as e: 
-		print(e)
+	except Exception:
+		log.exception("Error buscando imagen en Descargar")
 		db.close()
 		return {"R":-3}
-	print(Path("img").resolve(),R[0][1])
 	return static_file(R[0][1],Path(".").resolve())
 
+dbg_mode = os.environ.get("APP_DBG", "false").lower() == "true"
+
 if __name__ == '__main__':
-    run(host='0.0.0.0', port=8080, debug=True)
+    run(host=os.environ.get("APP_HOST", "127.0.0.1"), port=8080, debug=dbg_mode)
