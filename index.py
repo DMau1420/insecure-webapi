@@ -87,6 +87,12 @@ def getToken():
  * 
  * */
 """
+
+@route('/')
+def index_meme():
+        return static_file('meme.png',root='static')
+
+
 @post('/Registro')
 def Registro():
 
