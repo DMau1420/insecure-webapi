@@ -6,11 +6,14 @@ import base64
 import shutil
 import secrets
 import pyotp
+import gzip
+import io
 from argon2  import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHashError
-from datetime import datetime
 from pathlib import Path
-from bottle import route, run, template, post, request, response, static_file, error, hook
+from bottle import route, run, post, get, request, response, static_file, error, hook
+from bottle import BaseRequest
+BaseRequest.MEMFILE_MAX = 8 * 1024 * 1024
 from dotenv import load_dotenv
 
 # Cargar las varaibles de entorno
@@ -41,10 +44,14 @@ def getDatabase():
 def security_headers():
 	response.set_header('X-Content-Type-Options', 'nosniff')
 	response.set_header('X-Frame-Options', 'DENY')
-	response.set_header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'")
 	response.set_header('Referrer-Policy', 'no-referrer')
 	response.set_header('Cache-Control', 'no-store')
 	response.set_header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+
+
+	if not response.get_header('Content-Security-Policy'):
+		response.set_header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'")
+
 
 # Errores genericos
 @error(404)
@@ -62,6 +69,21 @@ def error500(e):
 	log.error("Error 500: %s", e.exception, exc_info=True)
 	response.content_type = 'application/json'
 	return json.dumps({"R": -500})
+
+
+# Maximo tamaño
+MAX_IMG_BYTES = 5 * 1024 * 1024 
+# Extensiones permitidas
+EXT_PERMITIDAS = {"png", "jpg", "jpeg", "gif"}
+
+
+def decodificar_imagen(data_b64):
+	comprimido = base64.b64decode(data_b64.encode(), validate=True)
+	with gzip.GzipFile(fileobj=io.BytesIO(comprimido)) as gz:
+		contenido = gz.read(MAX_IMG_BYTES + 1)
+	if len(contenido) > MAX_IMG_BYTES:
+		raise ValueError("Imagen demasiado grande")
+	return contenido
 
 
 def getToken():
@@ -84,16 +106,47 @@ def getToken():
 
 @route('/')
 def index_meme():
-        return static_file('meme.png',root='static')
+	return static_file('meme.png',root='static')
+
+@route('/despedida')
+def despedida_nakama():
+	response.content_type = 'text/html; charset=utf-8'
+	response.set_header('Content-Security-Policy',"default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-ancestors 'none'")
+	
+	return '''
+    <html>
+        <head>
+            <title>¿Nos volveremos a ver?</title>
+            <style>
+                body { background-color: #121212; color: #ffffff; text-align: center; font-family: Arial, sans-serif; padding-top: 50px; }
+                img { max-width: 600px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+                h1 { margin-top: 20px; color: #ff4757; }
+                p { color: #a4b0be; font-size: 1.2em; }
+            </style>
+        </head>
+        <body>
+            <h1>"¿Nos volveremos a ver... o nos llamaremos compañeros otra vez?"</h1>
+            <p>Aunque los caminos se separen, la marca en el brazo sigue ahí. </p>
+            <br>
+            <img src="/static/gracias.jpeg" alt="Despedida One Piece">
+        </body>
+    </html>
+    '''
+
+
+@get(r'/static/<archivo:re:[A-Za-z0-9_.-]+>')
+def estaticos(archivo):
+	return static_file(archivo, root=str(Path("static").resolve()))
+
+
+# Sirve solo la carpeta img
+@get(r'/img/<nombre:re:[A-Za-z0-9_-]+\.[A-Za-z0-9]+>')
+def servir_imagen(nombre):
+	return static_file(nombre, root=str(Path("img").resolve()))
 
 
 @post('/Registro')
 def Registro():
-
-	# Crear el secreto TOTP
-	totp_secret = pyotp.random_base32()
-
-	db = getDatabase()
 
 	if not request.json:
 		return {"R":-1}
@@ -103,6 +156,11 @@ def Registro():
 		return {"R":-1}
 	R = False
 
+	# Crear el secreto TOTP
+	totp_secret = pyotp.random_base32()
+
+	db = getDatabase()
+
 	try:
 		with db.cursor() as cursor:
 
@@ -111,10 +169,11 @@ def Registro():
 			cursor.execute('insert into Usuario values (Null, %s, %s, %s,%s)',(request.json["uname"], request.json["email"], hash_pw,totp_secret))
 			R = cursor.lastrowid
 			db.commit()
-		db.close()
 	except Exception:
 		log.exception("Error en Registro")
 		return {"R":-2}
+	finally:
+		db.close()
 	
 	uri = pyotp.TOTP(totp_secret).provisioning_uri(
 	name=request.json["uname"], issuer_name="InsecureWebapi")
@@ -135,7 +194,6 @@ def Registro():
 
 @post('/Login')
 def Login():
-	db = getDatabase()
 
 	if not request.json:
 		return {"R":-1}
@@ -145,6 +203,8 @@ def Login():
 	if not R:
 		return {"R":-1}
 	R = False
+
+	db = getDatabase()
 
 	try:
 
@@ -201,59 +261,70 @@ def Login():
  * Debe retornar codigo de estado
  * */
 """
+
 @post('/Imagen')
 def Imagen():
-	#Directorio
-	tmp = Path('tmp')
-	if not tmp.exists():
-		tmp.mkdir()
-	img = Path('img')
-	if not img.exists():
-		img.mkdir()
+	Path('tmp').mkdir(exist_ok=True)
+	Path('img').mkdir(exist_ok=True)
 
 	if not request.json:
 		return {"R":-1}
-	R = 'name' in request.json  and 'data' in request.json and 'ext' in request.json  and 'token' in request.json
+	
+	R = 'name' in request.json and 'data' in request.json and 'ext' in request.json and 'token' in request.json
 
 	if not R:
 		return {"R":-1}
-	
-	ext = str(request.json['ext'])
-	db = getDatabase()
 
-	TKN = request.json['token'];
-	
-	R = False
+	# Verificar si esta en la lista blanca de extensiones
+	ext = str(request.json['ext']).lower()
+	if ext not in EXT_PERMITIDAS:
+		return {"R":-1}
+
+	db = getDatabase()
+	TKN = str(request.json['token'])
+
 	try:
 		with db.cursor() as cursor:
-			cursor.execute('select id_Usuario from AccesoToken where token = %s', (str(TKN),))
+			cursor.execute('select id_Usuario from AccesoToken where token = %s', (TKN,))
 			R = cursor.fetchall()
 	except Exception:
 		log.exception("Error validando token en Imagen")
 		db.close()
 		return {"R":-2}
-	
-	
-	id_Usuario = R[0][0];
-	with open(f'tmp/{id_Usuario}',"wb") as imagen:
-		imagen.write(base64.b64decode(request.json['data'].encode()))
-	
-	# Guardar info del archivo en la base de datos
+
+	# Token invalido
+	if not R:
+		db.close()
+		return {"R":-2}
+	id_Usuario = R[0][0]
+
+	# base64 -> gzip -> bytes
+	try:
+		contenido = decodificar_imagen(str(request.json['data']))
+	except Exception:
+		log.warning("Imagen con base64/gzip inválido o demasiado grande")
+		db.close()
+		return {"R":-1}
+
+	# Nombre aleatorio
+	nombre_archivo = f"{secrets.token_urlsafe(16)}.{ext}"
+	tmp_path = f'tmp/{nombre_archivo}'
+	with open(tmp_path, "wb") as imagen:
+		imagen.write(contenido)
+
 	try:
 		with db.cursor() as cursor:
-			cursor.execute('insert into Imagen values(null, %s, %s, %s)', (str(request.json["name"]), "img/", id_Usuario))
-			cursor.execute('select max(id) as idImagen from Imagen where id_Usuario = %s', (id_Usuario,))
-			R = cursor.fetchall()
-			idImagen = R[0][0];
-			cursor.execute('update Imagen set ruta = %s where id = %s', (f'img/{idImagen}.{ext}', idImagen))
+			cursor.execute('insert into Imagen values(null, %s, %s, %s)',(str(request.json["name"]), f'img/{nombre_archivo}', id_Usuario))
+			idImagen = cursor.lastrowid
 			db.commit()
-			# Mover archivo a su nueva locacion
-			shutil.move('tmp/'+str(id_Usuario),f'img/{idImagen}.{ext}')
-			return {"R":0,"D":idImagen}
+		shutil.move(tmp_path, f'img/{nombre_archivo}')
+		return {"R":0,"D":idImagen}
 	except Exception:
 		log.exception("Error guardando imagen")
-		db.close()
 		return {"R":-3}
+	finally:
+		db.close()
+
 	
 """
 /*
@@ -267,44 +338,46 @@ def Imagen():
  * Debe retornar un Token 
  * */
 """
-
 @post('/Descargar')
 def Descargar():
 
-	db = getDatabase()
-	
 	if not request.json:
 		return {"R":-1}
-	R = 'token' in request.json and 'id' in request.json  
+	
+	if not ('token' in request.json and 'id' in request.json):
+		return {"R":-1}
+
+	TKN = str(request.json['token'])
+	idImagen = request.json['id']
+
+	db = getDatabase()
+
+	try:
+		with db.cursor() as cursor:
+			
+			cursor.execute('select id_Usuario from AccesoToken where token = %s', (TKN,))
+			R = cursor.fetchall()
+
+			if not R:
+				return {"R":-2}
+			
+			# Solo se puede pedir una imagen propia
+			cursor.execute('Select ruta from Imagen where id = %s and id_Usuario = %s', (idImagen, R[0][0]))
+			R = cursor.fetchall()
+
+	except Exception:
+		log.exception("Error en Descargar")
+		return {"R":-3}
+	finally:
+		db.close()
 
 	if not R:
-		return {"R":-1}
-	
-	TKN = request.json['token'];
-	idImagen = request.json['id'];
-	
-	R = False
-	try:
-		with db.cursor() as cursor:
-			cursor.execute('select id_Usuario from AccesoToken where token = %s', (str(TKN),))
-			R = cursor.fetchall()
-	except Exception:
-		log.exception("Error validando token en Descargar")
-		db.close()
-		return {"R":-2}
-		
-	# Buscar imagen y enviarla
-	try:
-		with db.cursor() as cursor:
-			cursor.execute('Select name,ruta from  Imagen where id = %s', (idImagen,))
-			R = cursor.fetchall()
-	except Exception:
-		log.exception("Error buscando imagen en Descargar")
-		db.close()
 		return {"R":-3}
-	return static_file(R[0][1],Path(".").resolve())
+
+	nombre = os.path.basename(R[0][0])
+	return {"R":0, "D": f"{os.environ.get('PUBLIC_URL', '')}/img/{nombre}"}
 
 dbg_mode = os.environ.get("APP_DBG", "false").lower() == "true"
 
 if __name__ == '__main__':
-    run(host=os.environ.get("APP_HOST", "127.0.0.1"), port=8080, debug=dbg_mode)
+	run(host=os.environ.get("APP_HOST", "127.0.0.1"), port=8080, debug=dbg_mode)
