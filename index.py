@@ -116,22 +116,23 @@ def despedida_nakama():
 	return '''
     <html>
         <head>
-            <title>¿Nos volveremos a ver?</title>
+            <title>Hasta volvernos a ver, compañeros</title>
             <style>
                 body { background-color: #121212; color: #ffffff; text-align: center; font-family: Arial, sans-serif; padding-top: 50px; }
-                img { max-width: 600px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
-                h1 { margin-top: 20px; color: #ff4757; }
-                p { color: #a4b0be; font-size: 1.2em; }
+                img { max-width: 600px; width: 90%; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+                h1 { margin-top: 20px; color: #ff4757; padding: 0 20px; }
+                p { color: #a4b0be; font-size: 1.2em; padding: 0 20px; }
             </style>
         </head>
         <body>
-            <h1>"¿Nos volveremos a ver... o nos llamaremos compañeros otra vez?"</h1>
-            <p>Aunque los caminos se separen, la marca en el brazo sigue ahí. </p>
+            <h1>"Si algún día nos volvemos a encontrar... ¿nos seguiremos llamando compañeros?"</h1>
+            <p>Aunque nuestros caminos se separen después de la facultad, lo que vivimos aquí es la prueba de nuestra amistad.</p>
             <br>
             <img src="/static/gracias.jpeg" alt="Despedida One Piece">
         </body>
     </html>
     '''
+
 
 
 @get(r'/static/<archivo:re:[A-Za-z0-9_.-]+>')
