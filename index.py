@@ -5,6 +5,7 @@ import mysql.connector
 import base64
 import shutil
 import secrets
+import pyotp
 from argon2  import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHashError
 from datetime import datetime
@@ -89,6 +90,9 @@ def index_meme():
 @post('/Registro')
 def Registro():
 
+	# Crear el secreto TOTP
+	totp_secret = pyotp.random_base32()
+
 	db = getDatabase()
 
 	if not request.json:
@@ -104,14 +108,17 @@ def Registro():
 
 			# Hash con Argon y Salt
 			hash_pw = ph.hash(request.json["password"])
-			cursor.execute('insert into Usuario values (Null, %s, %s, %s)',(request.json["uname"], request.json["email"], hash_pw))
+			cursor.execute('insert into Usuario values (Null, %s, %s, %s,%s)',(request.json["uname"], request.json["email"], hash_pw,totp_secret))
 			R = cursor.lastrowid
 			db.commit()
 		db.close()
 	except Exception:
 		log.exception("Error en Registro")
 		return {"R":-2}
-	return {"R":0,"D":R}
+	
+	uri = pyotp.TOTP(totp_secret).provisioning_uri(
+	name=request.json["uname"], issuer_name="InsecureWebapi")
+	return {"R":0, "D":R, "totp_secret":totp_secret, "totp_uri":uri}
 
 """
 /*
@@ -132,7 +139,8 @@ def Login():
 
 	if not request.json:
 		return {"R":-1}
-	R = 'uname' in request.json  and 'password' in request.json
+	
+	R = 'uname' in request.json and 'password' in request.json and 'totp' in request.json
 
 	if not R:
 		return {"R":-1}
@@ -141,9 +149,9 @@ def Login():
 	try:
 
 		with db.cursor() as cursor:
-			cursor.execute('Select id, password from Usuario where uname = %s',(request.json["uname"],))
+			cursor.execute('Select id, password, totp_secret from Usuario where uname = %s', (request.json["uname"],))
 			R = cursor.fetchall()
-
+		
 	except Exception:
 		log.exception("Error en Login")
 		db.close()
@@ -151,10 +159,12 @@ def Login():
 
 	usuario_verificado = False
 
-	if R: 
+	# Si hubo peticion y esta incluye el totpsecret
+	if R and R[0][2]:
 		try:
-			usuario_verificado = ph.verify(R[0][1],request.json["password"])
-		except (VerifyMismatchError,InvalidHashError):
+			ph.verify(R[0][1], request.json["password"])
+			usuario_verificado = pyotp.TOTP(R[0][2]).verify(str(request.json["totp"]), valid_window=1)
+		except (VerifyMismatchError, InvalidHashError):
 			usuario_verificado = False
 
 
